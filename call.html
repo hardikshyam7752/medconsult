@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MedConsult - Video Consultation</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            background: #111827;
+            color: #fff;
+            margin: 0;
+            padding: 20px
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px
+        }
+
+        button {
+            padding: 10px 16px;
+            border: 0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 15px
+        }
+
+        button:disabled {
+            opacity: .45;
+            cursor: not-allowed
+        }
+
+        .green {
+            background: #16a34a;
+            color: #fff
+        }
+
+        .red {
+            background: #dc2626;
+            color: #fff
+        }
+
+        .gray {
+            background: #374151;
+            color: #fff
+        }
+
+        .videos {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 12px
+        }
+
+        video {
+            background: #000;
+            width: 420px;
+            max-width: 100%;
+            border-radius: 8px
+        }
+
+        #status {
+            margin: 10px 0;
+            color: #fbbf24
+        }
+
+        #count {
+            margin-bottom: 10px;
+            color: #9ca3af
+        }
+
+        .row {
+            background: #1f2937;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 8px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div><b id="who"></b> <span id="roleTag"></span></div>
+        <button class="gray" id="logout">Logout</button>
+    </header>
+
+    <div id="status">Connecting...</div>
+    <div id="count"></div>
+
+    <button class="green" id="startBtn" style="display:none">Start Video Call (to a Doctor)</button>
+    <button class="red" id="hangBtn" style="display:none">End Call</button>
+    <div id="incoming"></div>
+
+    <div class="videos">
+        <div>
+            <div>You</div><video id="local" autoplay playsinline muted></video>
+        </div>
+        <div>
+            <div>Remote</div><video id="remote" autoplay playsinline></video>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const auth = JSON.parse(sessionStorage.getItem('auth') || 'null');
+        if (!auth) location.href = '/';
+        const isDoctor = auth.role === 'doctor';
+        const $ = (id) => document.getElementById(id);
+        $('who').textContent = auth.username;
+        $('roleTag').textContent = `(${auth.role})`;
+        $('logout').onclick = () => { sessionStorage.removeItem('auth'); location.href = '/'; };
+
+        const socket = io({ auth: { token: auth.token } });
+        socket.on('connect_error', () => { sessionStorage.removeItem('auth'); location.href = '/'; });
+
+        const setStatus = (t) => ($('status').textContent = t);
+        let pc = null, localStream = null;
+        let busy = false;            // patient: calling or in call
+        let doctorCount = 0;         // free doctors online
+        let pendingUserId = null;    // doctor: patient I tried to accept
+        let confirmed = false;       // doctor: offer received = I really got the call
+        let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+        fetch('/api/ice').then((r) => r.json()).then((s) => { iceServers = s; }).catch(() => { });
+
+        /* ----- WebRTC helpers ----- */
+        async function getMedia() {
+            if (!localStream) {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                $('local').srcObject = localStream;
+            }
+        }
+
+        function createPeerConnection() {
+            pc = new RTCPeerConnection({ iceServers });
+            localStream.getTracks().forEach((t) => pc.addTrack(t, localStream)); // send my camera/mic
+            pc.ontrack = (e) => { $('remote').srcObject = e.streams[0]; };       // show their camera/mic
+            pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice', e.candidate); };
+            pc.onconnectionstatechange = () => {
+                if (pc?.connectionState === 'connected') setStatus('Call connected');
+                if (pc?.connectionState === 'failed') setStatus('Connection failed (network blocked? add a TURN server)');
+            };
+        }
+
+        function cleanup() {
+            if (pc) { pc.close(); pc = null; }
+            if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+            $('local').srcObject = null;
+            $('remote').srcObject = null;
+            busy = false; pendingUserId = null; confirmed = false;
+            updateUI();
+        }
+
+        function updateUI() {
+            if (isDoctor) {
+                $('hangBtn').style.display = pc ? '' : 'none';
+            } else {
+                $('startBtn').style.display = busy ? 'none' : '';
+                $('startBtn').disabled = doctorCount === 0;
+                $('hangBtn').style.display = busy ? '' : 'none';
+                $('count').textContent = `Doctors available: ${doctorCount}`;
+            }
+        }
+
+        socket.on('doctor-count', (n) => { doctorCount = n; updateUI(); });
+
+        /* ----- PATIENT side ----- */
+        if (!isDoctor) {
+            setStatus('Ready');
+            $('startBtn').onclick = async () => {
+                try { await getMedia(); } catch { return setStatus('Camera/mic permission denied'); }
+                busy = true; updateUI();
+                socket.emit('call-request');
+                setStatus('Calling available doctors...');
+            };
+
+            socket.on('ringing', () => setStatus('Ringing... waiting for a doctor to pick up'));
+
+            // a doctor accepted -> I create the offer
+            socket.on('call-accepted', async ({ doctor }) => {
+                createPeerConnection();
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('offer', offer);
+                setStatus(`Connecting to Dr. ${doctor}...`);
+            });
+            socket.on('answer', async (answer) => { await pc.setRemoteDescription(answer); });
+            socket.on('call-failed', (reason) => { cleanup(); setStatus(reason); });
+        }
+
+        /* ----- DOCTOR side ----- */
+        function incomingCount() { return $('incoming').children.length; }
+        function doctorIdleStatus(msg) {
+            setStatus(incomingCount() ? 'Incoming call...' : (msg || 'Online - waiting for calls'));
+        }
+
+        if (isDoctor) {
+            doctorIdleStatus();
+
+            socket.on('incoming-call', ({ userId, from }) => {
+                if (pc || document.getElementById('in-' + userId)) return;
+                const row = document.createElement('div');
+                row.className = 'row'; row.id = 'in-' + userId;
+                const t = document.createElement('span');
+                t.textContent = `Patient ${from} is calling`;
+                const a = document.createElement('button');
+                a.className = 'green'; a.textContent = 'Accept';
+                a.onclick = () => acceptCall(userId);
+                const r = document.createElement('button');
+                r.className = 'red'; r.textContent = 'Reject';
+                r.onclick = () => { socket.emit('call-reject', { userId }); removeIncoming(userId); doctorIdleStatus(); };
+                row.append(t, a, r);
+                $('incoming').appendChild(row);
+                doctorIdleStatus();
+            });
+
+            function removeIncoming(userId) { document.getElementById('in-' + userId)?.remove(); }
+
+            async function acceptCall(userId) {
+                if (pc) return;
+                try { await getMedia(); } catch {
+                    socket.emit('call-reject', { userId });
+                    removeIncoming(userId);
+                    return setStatus('Camera/mic permission denied');
+                }
+                pendingUserId = userId; confirmed = false;
+                createPeerConnection();               // ready before the offer arrives
+                socket.emit('call-accept', { userId });
+                $('incoming').innerHTML = '';
+                setStatus('Connecting...');
+                updateUI();
+            }
+
+            // call was taken by another doctor, or patient cancelled
+            socket.on('call-gone', ({ userId }) => {
+                removeIncoming(userId);
+                if (userId === pendingUserId && !confirmed) {
+                    cleanup();
+                    doctorIdleStatus('Call no longer available (taken by another doctor or cancelled)');
+                } else {
+                    doctorIdleStatus();
+                }
+            });
+
+            // patient sent offer -> I answer
+            socket.on('offer', async (offer) => {
+                confirmed = true;
+                await pc.setRemoteDescription(offer);
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.emit('answer', answer);
+            });
+        }
+
+        /* ----- Both sides ----- */
+        socket.on('ice', async (c) => { try { await pc?.addIceCandidate(c); } catch (e) { console.error(e); } });
+
+        $('hangBtn').onclick = () => {
+            socket.emit('hangup');
+            cleanup();
+            isDoctor ? doctorIdleStatus() : setStatus('Call ended');
+        };
+        socket.on('hangup', () => {
+            cleanup();
+            isDoctor ? doctorIdleStatus('Call ended. Waiting for calls') : setStatus('Call ended');
+        });
+        updateUI();
+    </script>
+</body>
+
+</html>

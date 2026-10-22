@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MedConsult - Login</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            background: #f3f4f6;
+            display: flex;
+            justify-content: center;
+            padding-top: 60px
+        }
+
+        .card {
+            background: #fff;
+            padding: 28px;
+            border-radius: 12px;
+            width: 320px;
+            box-shadow: 0 2px 12px #0002
+        }
+
+        h2 {
+            margin-top: 0
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 14px
+        }
+
+        .tabs button {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            background: #fff;
+            border-radius: 6px;
+            cursor: pointer
+        }
+
+        .tabs button.active {
+            background: #2563eb;
+            color: #fff;
+            border-color: #2563eb
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 6px 0;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 6px
+        }
+
+        .go {
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            border: 0;
+            border-radius: 6px;
+            background: #16a34a;
+            color: #fff;
+            cursor: pointer;
+            font-size: 15px
+        }
+
+        .link {
+            color: #2563eb;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 10px;
+            display: block;
+            text-align: center
+        }
+
+        #msg {
+            color: #dc2626;
+            font-size: 14px;
+            min-height: 18px
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2 id="title">Login</h2>
+        <div class="tabs">
+            <button id="tabPatient" class="active">As Patient</button>
+            <button id="tabDoctor">As Doctor</button>
+        </div>
+        <input id="username" placeholder="Username">
+        <input id="password" type="password" placeholder="Password">
+        <div id="msg"></div>
+        <button class="go" id="submit">Login</button>
+        <span class="link" id="toggle">New here? Sign up</span>
+    </div>
+
+    <script>
+        let role = 'patient', mode = 'login';
+        const $ = (id) => document.getElementById(id);
+
+        function render() {
+            $('title').textContent = mode === 'login' ? 'Login' : 'Sign up';
+            $('submit').textContent = mode === 'login' ? 'Login' : 'Create account';
+            $('toggle').textContent = mode === 'login' ? 'New here? Sign up' : 'Already have an account? Login';
+            $('tabPatient').classList.toggle('active', role === 'patient');
+            $('tabDoctor').classList.toggle('active', role === 'doctor');
+            $('msg').textContent = '';
+        }
+        $('tabPatient').onclick = () => { role = 'patient'; render(); };
+        $('tabDoctor').onclick = () => { role = 'doctor'; render(); };
+        $('toggle').onclick = () => { mode = mode === 'login' ? 'register' : 'login'; render(); };
+
+        async function post(url, body) {
+            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || 'Something went wrong');
+            return data;
+        }
+
+        $('submit').onclick = async () => {
+            const username = $('username').value.trim(), password = $('password').value;
+            try {
+                if (mode === 'register') {
+                    await post('/api/register', { username, password, role });
+                    mode = 'login'; render();
+                    $('msg').style.color = '#16a34a';
+                    $('msg').textContent = 'Account created. Now login.';
+                    return;
+                }
+                const d = await post('/api/login', { username, password, role });
+                sessionStorage.setItem('auth', JSON.stringify(d)); // per tab
+                location.href = '/call.html';
+            } catch (e) {
+                $('msg').style.color = '#dc2626';
+                $('msg').textContent = e.message;
+            }
+        };
+
+        if (sessionStorage.getItem('auth')) location.href = '/call.html';
+        render();
+    </script>
+</body>
+
+</html>
